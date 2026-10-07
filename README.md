@@ -1,0 +1,248 @@
+# Phonebook Application
+
+A full-stack phonebook app built as a training project.
+
+- **Backend:** Python + FastAPI + SQLAlchemy + PostgreSQL
+- **Frontend:** Vue 3 + Vite + Vue Router + Axios
+- **Deployment:** Docker Compose (backend, database, frontend services)
+
+## Features
+
+- Add, view, update, and delete contacts (full CRUD via REST API)
+- Contact list with search (by name or phone number) and pagination
+- Input validation on both backend and frontend (E.164 phone format, unique phone/email)
+- Responsive UI with a contact list, contact detail/edit page, and create form
+- Auto-generated interactive API docs (Swagger UI)
+
+## Architecture
+
+```
++----------------+        /api/*         +----------------+        +----------------+
+|   Frontend     | <-------------------> |    Backend     | <----> |   PostgreSQL   |
+|  Vue 3/nginx   |   nginx proxy_pass    |  FastAPI :8000 |  db:   |   db :5432     |
+|  http://:8080  |                       |                |  5432  |  (pgdata vol.) |
++----------------+                       +----------------+        +----------------+
+```
+
+All three services run in Docker Compose with `restart: unless-stopped`, so they
+automatically come back after a Docker engine or Docker Desktop restart.
+
+## Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop) with the WSL 2 backend (Windows), or Docker Engine + Compose v2 (Linux/macOS)
+- At least ~2 GB of free disk space for images and the database volume
+
+## Quick start (Docker)
+
+1. Create your environment file (database credentials):
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Build the images:
+
+   ```bash
+   docker compose build
+   ```
+
+3. Start the application:
+
+   ```bash
+   docker compose up
+   ```
+
+   Or build and start in one step, detached (recommended):
+
+   ```bash
+   docker compose up --build
+   ```
+
+   Add `-d` to any of the `up` commands to run in the background:
+
+   ```bash
+   docker compose up --build -d
+   ```
+
+4. Open the application:
+
+   | URL | What |
+   | --- | --- |
+   | <http://localhost:8080> | Frontend (Vue 3 app) |
+   | <http://localhost:8000> | Backend API (FastAPI) |
+   | <http://localhost:8000/docs> | Interactive Swagger API docs |
+
+5. Stop the application:
+
+   ```bash
+   docker compose down
+   ```
+
+6. Stop the application **and delete all data** (removes the PostgreSQL volume):
+
+   ```bash
+   docker compose down -v
+   ```
+
+## Docker services
+
+| Service   | Image / build        | Host port | Internal port | Notes                                    |
+| --------- | -------------------- | --------- | ------------- | ---------------------------------------- |
+| `frontend` | `./frontend` (Vite build → nginx) | 8080 → 80 | 80 | nginx proxies `/api/` to the backend     |
+| `backend`  | `./backend` (Python 3.11-slim)   | 8000 → 8000 | 8000 | FastAPI/uvicorn; connects to PostgreSQL via the `db` service name |
+| `db`       | `postgres:16-alpine`             | (internal) | 5432 | Persistent data in the `pgdata` volume; health-gated startup |
+
+### PostgreSQL configuration
+
+Configured through `.env` (see `.env.example`):
+
+| Variable         | Default     | Where used                                              |
+| ---------------- | ----------- | ------------------------------------------------------- |
+| `POSTGRES_USER`  | `phonebook` | superuser created by the postgres image                 |
+| `POSTGRES_PASSWORD` | `phonebook` | password for that user                              |
+| `POSTGRES_DB`    | `phonebook` | database created on first startup                       |
+
+- The backend connects to `postgresql+psycopg2://<user>:<password>@db:5432/<db>` —
+  the Compose **service name** `db`, never `localhost` (inside a container,
+  `localhost` refers to the container itself).
+- PostgreSQL data persists in the `phonebookpython_pgdata` Docker volume.
+  `docker compose down` keeps the volume; `docker compose down -v` deletes it.
+- The backend waits for PostgreSQL via `depends_on: condition: service_healthy`
+  (`pg_isready` healthcheck), and creates the `contacts` table on startup.
+
+## API reference
+
+| Method | Endpoint            | Description                                            |
+| ------ | ------------------- | ------------------------------------------------------ |
+| GET    | `/health`           | Health check                                           |
+| GET    | `/contacts`         | List contacts (`page`, `page_size`, `q` params; total in `X-Total-Count` header) |
+| POST   | `/contacts`         | Add a new contact                                      |
+| GET    | `/contacts/{id}`    | Retrieve a specific contact                            |
+| PUT    | `/contacts/{id}`    | Update a specific contact (only provided fields change) |
+| DELETE | `/contacts/{id}`    | Delete a specific contact                              |
+
+Request/response example (`POST /contacts`):
+
+```json
+{
+  "name": "John Doe",
+  "phone_number": "+1234567890",
+  "email": "john@example.com",
+  "address": "123 Main St"
+}
+```
+
+Validation rules:
+- `name` is required (max 255 chars)
+- `phone_number` is required, unique, and must match E.164 format, e.g. `+1234567890`
+- `email` is optional but must be a valid email and unique when provided
+- `address` is optional
+
+Error responses: `404` (contact not found), `409` (duplicate phone number or email),
+`422` (validation error).
+
+## Local development (without Docker)
+
+### Backend
+
+```bash
+cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Point at a local PostgreSQL (create the database first)
+set DATABASE_URL=postgresql+psycopg2://phonebook:phonebook@localhost:5432/phonebook   # Windows
+export DATABASE_URL=postgresql+psycopg2://phonebook:phonebook@localhost:5432/phonebook  # macOS/Linux
+
+uvicorn app.main:app --reload
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/api` requests to `http://localhost:8000`.
+
+### Tests
+
+```bash
+cd backend
+python -m pytest          # 14 tests, uses an in-memory SQLite DB (test-only)
+```
+
+Or inside the running container:
+
+```bash
+docker compose exec backend python -m pytest
+```
+
+## Project structure
+
+```
+PhonebookPython/
+├── docker-compose.yml        # backend + db + frontend services
+├── .env.example              # environment variables (database credentials)
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── app/
+│   │   ├── main.py           # FastAPI app + REST endpoints
+│   │   ├── models.py         # SQLAlchemy Contact model
+│   │   ├── schemas.py        # Pydantic validation schemas
+│   │   ├── crud.py           # database operations (incl. search/pagination)
+│   │   └── database.py       # engine, session, Base (DATABASE_URL from env)
+│   └── tests/                # pytest suite (in-memory SQLite, test-only)
+└── frontend/
+    ├── Dockerfile            # builds with Vite, serves with nginx
+    ├── nginx.conf            # SPA routing + /api proxy to backend
+    └── src/
+        ├── api.js            # axios wrapper for the backend API
+        ├── router.js         # routes: list, detail/edit, create
+        └── views/            # ContactList.vue, ContactDetail.vue, CreateContact.vue
+```
+
+## Troubleshooting
+
+- **"Docker Desktop is unable to start" / WSL bootstrap errors (`0xc00000fd`, `0xc0000409`)**:
+  1. Quit Docker Desktop fully (right-click the tray icon → Quit, or
+     `Get-Process "Docker Desktop","com.docker.backend" | Stop-Process -Force` in PowerShell).
+  2. Run `wsl --shutdown`.
+  3. If it persists, reset the corrupted Docker WSL distro:
+     `wsl --unregister docker-desktop` (this only wipes Docker's own WSL state —
+     images/volumes — and Docker Desktop recreates it on next launch).
+  4. Start Docker Desktop again and wait ~1–2 minutes for the engine.
+  5. Re-run `docker compose up --build`.
+
+- **"There is not enough space on the disk"** (Docker Desktop crash):
+  Docker Desktop writes its WSL data disk and logs to the system drive. Free up
+  space (clear `%TEMP%`, `npm cache clean --force`, remove old WSL data disks with
+  `wsl --unregister <name>` for distros you no longer need) and restart Docker
+  Desktop. Note where the data disk lives:
+  `Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss\*" | Select-Object DistributionName, BasePath`.
+
+- **Backend returns 500 right after `docker compose restart db`**: transient —
+  PostgreSQL needs a few seconds to accept connections. Wait ~10 seconds and retry.
+
+- **Port already in use:** change the host ports in `docker-compose.yml`
+  (`"8000:8000"`, `"8080:80"`).
+
+- **Reset the database:** `docker compose down -v` (deletes the `pgdata` volume),
+  then `docker compose up --build`.
+
+- **Check logs:** `docker compose logs backend`, `docker compose logs db`,
+  `docker compose logs frontend`.
+
+- **Verify PostgreSQL directly:**
+  `docker compose exec db psql -U phonebook -d phonebook -c "SELECT * FROM contacts;"`
+
+## Possible enhancements
+
+- Pinia state management, unit tests for the frontend, and the
+  `vue-phone-number-input` component for richer phone input. A basic GitHub
+  Actions CI workflow for the backend tests is included in `.github/workflows`.

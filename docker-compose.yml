@@ -1,0 +1,40 @@
+services:
+  # --- Database: PostgreSQL in its own container ---
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-phonebook}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-phonebook}
+      POSTGRES_DB: ${POSTGRES_DB:-phonebook}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-phonebook} -d ${POSTGRES_DB:-phonebook}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Backend: FastAPI app ---
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-phonebook}:${POSTGRES_PASSWORD:-phonebook}@db:5432/${POSTGRES_DB:-phonebook}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # --- Frontend: Vue 3 app built by Vite and served by nginx ---
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
