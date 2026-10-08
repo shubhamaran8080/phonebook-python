@@ -1,10 +1,40 @@
 import axios from 'axios'
+import { auth, clearAuth } from './auth'
 
 // In Docker the nginx proxy forwards /api to the backend;
 // in local development the Vite dev server does the same.
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api'
 })
+
+/**
+ * Register a handler that is called when the backend answers
+ * with 401 (e.g. expired token). Used to redirect to /login.
+ */
+let unauthorizedHandler = null
+export function onUnauthorized(handler) {
+  unauthorizedHandler = handler
+}
+
+// Attach the JWT to every request.
+api.interceptors.request.use((config) => {
+  if (auth.token) {
+    config.headers.Authorization = `Bearer ${auth.token}`
+  }
+  return config
+})
+
+// On 401, clear the stored session and let the app redirect to login.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      clearAuth()
+      if (unauthorizedHandler) unauthorizedHandler()
+    }
+    return Promise.reject(error)
+  }
+)
 
 /** Extract a human-readable message from an axios error. */
 export function extractError(error) {
@@ -18,6 +48,21 @@ export function extractError(error) {
 }
 
 export default {
+  // --- Authentication ---
+  login(credentials) {
+    return api.post('/auth/login', credentials)
+  },
+  logout() {
+    return api.post('/auth/logout')
+  },
+  getMe() {
+    return api.get('/auth/me')
+  },
+  getStats() {
+    return api.get('/stats')
+  },
+
+  // --- Contacts ---
   listContacts({ page = 1, pageSize = 10, search = '' } = {}) {
     return api.get('/contacts', {
       params: { page, page_size: pageSize, q: search }

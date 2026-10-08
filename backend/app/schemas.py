@@ -41,3 +41,31 @@ class ContactResponse(ContactBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class LoginRequest(BaseModel):
+    """Login payload. `username` accepts a username or an email address."""
+
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class UserResponse(BaseModel):
+    """User info returned by the API (never includes the password hash)."""
+
+    id: int
+    username: str
+    email: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class StatsResponse(BaseModel):
+    """Phonebook statistics for the dashboard."""
+
+    total_contacts: int
+    recent_contacts: int
+    with_email: int
+    with_phone: int
+    recent_list: list[ContactResponse]

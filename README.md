@@ -8,10 +8,13 @@ A full-stack phonebook app built as a training project.
 
 ## Features
 
+- JWT authentication (login with username or email, bcrypt password hashing)
 - Add, view, update, and delete contacts (full CRUD via REST API)
+- Dashboard with live statistics from the database
 - Contact list with search (by name or phone number) and pagination
 - Input validation on both backend and frontend (E.164 phone format, unique phone/email)
-- Responsive UI with a contact list, contact detail/edit page, and create form
+- Responsive, modern dashboard UI (sidebar navigation, mobile hamburger menu)
+- Seed script to create the first user and generate thousands of dummy contacts
 - Auto-generated interactive API docs (Swagger UI)
 
 ## Architecture
@@ -26,6 +29,11 @@ A full-stack phonebook app built as a training project.
 
 All three services run in Docker Compose with `restart: unless-stopped`, so they
 automatically come back after a Docker engine or Docker Desktop restart.
+
+Authentication: the frontend stores the JWT in localStorage and sends it as a
+`Authorization: Bearer <token>` header. All contact and stats endpoints require
+a valid token; unauthenticated requests get `401` and the app redirects to
+the login page. Passwords are stored as bcrypt hashes.
 
 ## Prerequisites
 
@@ -55,16 +63,26 @@ automatically come back after a Docker engine or Docker Desktop restart.
    Or build and start in one step, detached (recommended):
 
    ```bash
-   docker compose up --build
-   ```
-
-   Add `-d` to any of the `up` commands to run in the background:
-
-   ```bash
    docker compose up --build -d
    ```
 
-4. Open the application:
+4. **Create the first user** (required before you can sign in):
+
+   ```bash
+   docker compose exec backend python seed.py --create-user --username demo
+   ```
+
+   You will be prompted for a password (or pass `--password 'your-password'`,
+   or set the `SEED_PASSWORD` environment variable). Then sign in at
+   <http://localhost:8080> with `demo` / your password.
+
+5. (Optional) Generate dummy contacts for testing:
+
+   ```bash
+   docker compose exec backend python seed.py --count 1000
+   ```
+
+6. Open the application:
 
    | URL | What |
    | --- | --- |
@@ -72,13 +90,13 @@ automatically come back after a Docker engine or Docker Desktop restart.
    | <http://localhost:8000> | Backend API (FastAPI) |
    | <http://localhost:8000/docs> | Interactive Swagger API docs |
 
-5. Stop the application:
+7. Stop the application:
 
    ```bash
    docker compose down
    ```
 
-6. Stop the application **and delete all data** (removes the PostgreSQL volume):
+8. Stop the application **and delete all data** (removes the PostgreSQL volume):
 
    ```bash
    docker compose down -v
@@ -101,6 +119,7 @@ Configured through `.env` (see `.env.example`):
 | `POSTGRES_USER`  | `phonebook` | superuser created by the postgres image                 |
 | `POSTGRES_PASSWORD` | `phonebook` | password for that user                              |
 | `POSTGRES_DB`    | `phonebook` | database created on first startup                       |
+| `SECRET_KEY`     | (empty)     | JWT signing key; set a long random string in `.env`     |
 
 - The backend connects to `postgresql+psycopg2://<user>:<password>@db:5432/<db>` —
   the Compose **service name** `db`, never `localhost` (inside a container,
@@ -108,18 +127,26 @@ Configured through `.env` (see `.env.example`):
 - PostgreSQL data persists in the `phonebookpython_pgdata` Docker volume.
   `docker compose down` keeps the volume; `docker compose down -v` deletes it.
 - The backend waits for PostgreSQL via `depends_on: condition: service_healthy`
-  (`pg_isready` healthcheck), and creates the `contacts` table on startup.
+  (`pg_isready` healthcheck), and creates the `contacts` and `users` tables on startup.
+- If `SECRET_KEY` is empty, the backend generates an ephemeral random key on
+  each start (fine for demos, but users must log in again after a restart).
 
 ## API reference
 
-| Method | Endpoint            | Description                                            |
-| ------ | ------------------- | ------------------------------------------------------ |
-| GET    | `/health`           | Health check                                           |
-| GET    | `/contacts`         | List contacts (`page`, `page_size`, `q` params; total in `X-Total-Count` header) |
-| POST   | `/contacts`         | Add a new contact                                      |
-| GET    | `/contacts/{id}`    | Retrieve a specific contact                            |
-| PUT    | `/contacts/{id}`    | Update a specific contact (only provided fields change) |
-| DELETE | `/contacts/{id}`    | Delete a specific contact                              |
+| Method | Endpoint            | Description                                            | Auth |
+| ------ | ------------------- | ------------------------------------------------------ | ---- |
+| GET    | `/health`           | Health check                                           | —    |
+| POST   | `/auth/login`       | Login with username or email, returns a JWT            | —    |
+| GET    | `/auth/me`          | Currently logged-in user                               | ✓    |
+| POST   | `/auth/logout`      | Logout (client discards the token)                     | —    |
+| GET    | `/stats`            | Dashboard statistics + 5 most recent contacts          | ✓    |
+| GET    | `/contacts`         | List contacts (`page`, `page_size`, `q` params; total in `X-Total-Count` header) | ✓ |
+| POST   | `/contacts`         | Add a new contact                                      | ✓ |
+| GET    | `/contacts/{id}`    | Retrieve a specific contact                            | ✓ |
+| PUT    | `/contacts/{id}`    | Update a specific contact (only provided fields change) | ✓ |
+| DELETE | `/contacts/{id}`    | Delete a specific contact                              | ✓ |
+
+Call an authenticated endpoint with the header `Authorization: Bearer <access_token>`.
 
 Request/response example (`POST /contacts`):
 
@@ -138,8 +165,55 @@ Validation rules:
 - `email` is optional but must be a valid email and unique when provided
 - `address` is optional
 
-Error responses: `404` (contact not found), `409` (duplicate phone number or email),
+Error responses: `401` (not authenticated or bad credentials), `404` (contact not found), `409` (duplicate phone number or email),
 `422` (validation error).
+
+## Authentication
+
+- **Login** — `POST /auth/login` with `{"username": "...", "password": "..."}`
+  (the `username` field accepts a username *or* an email). Returns
+  `{"access_token", "token_type": "bearer", "user": {...}}`.
+- Passwords are hashed with **bcrypt**; only the hash is stored.
+- Tokens are **JWTs** signed with `SECRET_KEY` (from `.env`) and expire
+  after 12 hours. The frontend stores the token in localStorage and
+  sends it on every request; a `401` response logs the user out.
+- Contact and stats endpoints require the header
+  `Authorization: Bearer <token>`.
+
+**Create the first/demo user** (there are no users by default):
+
+```bash
+docker compose exec backend python seed.py --create-user --username demo
+# prompts for a password, or use:
+docker compose exec backend python seed.py --create-user --username demo --password 'your-password'
+```
+
+## Seeding dummy data
+
+`backend/seed.py` generates realistic dummy contacts with Faker.
+Phone numbers and emails are generated uniquely, so existing
+contacts are never duplicated or modified.
+
+```bash
+docker compose exec backend python seed.py --count 100     # 100 contacts
+docker compose exec backend python seed.py --count 1000    # 1,000 contacts
+docker compose exec backend python seed.py --count 5000    # 5,000 contacts
+```
+
+Both actions can be combined:
+
+```bash
+docker compose exec backend python seed.py --create-user --username demo --count 1000
+```
+
+Without Docker (from the `backend` folder, with the venv active):
+
+```bash
+python seed.py --create-user --username demo
+python seed.py --count 1000
+```
+
+The seed operation is manual — it never runs automatically on startup.
 
 ## Local development (without Docker)
 
@@ -187,24 +261,28 @@ docker compose exec backend python -m pytest
 ```
 PhonebookPython/
 ├── docker-compose.yml        # backend + db + frontend services
-├── .env.example              # environment variables (database credentials)
+├── .env.example              # environment variables (database credentials, SECRET_KEY)
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
+│   ├── seed.py               # seed script: --create-user and --count N
 │   ├── app/
-│   │   ├── main.py           # FastAPI app + REST endpoints
-│   │   ├── models.py         # SQLAlchemy Contact model
+│   │   ├── main.py           # FastAPI app + REST endpoints (auth + contacts + stats)
+│   │   ├── models.py         # SQLAlchemy Contact and User models
 │   │   ├── schemas.py        # Pydantic validation schemas
-│   │   ├── crud.py           # database operations (incl. search/pagination)
+│   │   ├── crud.py           # database operations (incl. search/pagination/stats)
+│   │   ├── auth.py           # bcrypt hashing, JWT creation/verification
 │   │   └── database.py       # engine, session, Base (DATABASE_URL from env)
 │   └── tests/                # pytest suite (in-memory SQLite, test-only)
 └── frontend/
     ├── Dockerfile            # builds with Vite, serves with nginx
     ├── nginx.conf            # SPA routing + /api proxy to backend
     └── src/
-        ├── api.js            # axios wrapper for the backend API
-        ├── router.js         # routes: list, detail/edit, create
-        └── views/            # ContactList.vue, ContactDetail.vue, CreateContact.vue
+        ├── api.js            # axios wrapper (Bearer token interceptor)
+        ├── auth.js           # authentication state (token in localStorage)
+        ├── router.js         # routes + auth guard (unauthenticated → /login)
+        ├── App.vue           # app shell: sidebar (desktop) / hamburger (mobile)
+        └── views/            # Dashboard, ContactList, ContactDetail, CreateContact, Profile, Login
 ```
 
 ## Troubleshooting

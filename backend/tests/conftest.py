@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app import auth as auth_utils
+from app import models
 from app.database import Base, get_db
 from app.main import app
 
@@ -29,6 +31,27 @@ def db_session():
 
 @pytest.fixture()
 def client(db_session):
+    """Test client for the contact API with authentication bypassed."""
+    def override_get_db():
+        yield db_session
+
+    def override_get_current_user():
+        return models.User(
+            id=1, username="testuser", email="testuser@example.com",
+            hashed_password="n/a",
+        )
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[auth_utils.get_current_user] = override_get_current_user
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def api_client(db_session):
+    """Test client that exercises the real JWT authentication."""
     def override_get_db():
         yield db_session
 

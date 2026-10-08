@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -30,6 +32,25 @@ def get_contacts(db: Session, *, skip: int = 0, limit: int = 100, search=None):
 def count_contacts(db: Session, search=None) -> int:
     query = _apply_search(db.query(models.Contact), search)
     return query.with_entities(func.count(models.Contact.id)).scalar() or 0
+
+
+def count_contacts_recent(db: Session, *, days: int = 7) -> int:
+    """Contacts created within the last `days` days."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return db.query(models.Contact).filter(models.Contact.created_at >= since).count()
+
+
+def count_contacts_with_field(db: Session, field) -> int:
+    return db.query(models.Contact).filter(field.isnot(None)).count()
+
+
+def get_recent_contacts(db: Session, *, limit: int = 5):
+    return (
+        db.query(models.Contact)
+        .order_by(models.Contact.created_at.desc(), models.Contact.id.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 def get_contact(db: Session, contact_id: int):
