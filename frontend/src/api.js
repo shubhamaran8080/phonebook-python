@@ -79,5 +79,20 @@ export default {
   },
   deleteContact(id) {
     return api.delete(`/contacts/${id}`)
+  },
+
+  // --- CSV import / export ---
+  importContacts(formData) {
+    return api.post('/contacts/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  exportContacts(search = '') {
+    // The backend streams a CSV of every contact the
+    // search matches (not just the current page).
+    return api.get('/contacts/export', {
+      params: search ? { q: search } : {},
+      responseType: 'blob'
+    })
   }
 }

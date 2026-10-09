@@ -11,7 +11,8 @@ A full-stack phonebook app built as a training project.
 - JWT authentication (login with username or email, bcrypt password hashing)
 - Add, view, update, and delete contacts (full CRUD via REST API)
 - Dashboard with live statistics from the database
-- Contact list with search (by name or phone number) and pagination
+- Contact list with search (by name or phone number) and Google-style pagination
+- **Import contacts from CSV and export contacts to CSV** (with a downloadable template, per-row validation reports, and duplicate handling)
 - Input validation on both backend and frontend (E.164 phone format, unique phone/email)
 - Responsive, modern dashboard UI (sidebar navigation, mobile hamburger menu)
 - Seed script to create the first user and generate thousands of dummy contacts
@@ -142,6 +143,8 @@ Configured through `.env` (see `.env.example`):
 | GET    | `/stats`            | Dashboard statistics + 5 most recent contacts          | ✓    |
 | GET    | `/contacts`         | List contacts (`page`, `page_size`, `q` params; total in `X-Total-Count` header) | ✓ |
 | POST   | `/contacts`         | Add a new contact                                      | ✓ |
+| POST   | `/contacts/import`  | Import contacts from an uploaded CSV file              | ✓ |
+| GET    | `/contacts/export`  | Download contacts as CSV (`q` param filters the export) | ✓ |
 | GET    | `/contacts/{id}`    | Retrieve a specific contact                            | ✓ |
 | PUT    | `/contacts/{id}`    | Update a specific contact (only provided fields change) | ✓ |
 | DELETE | `/contacts/{id}`    | Delete a specific contact                              | ✓ |
@@ -215,6 +218,74 @@ python seed.py --count 1000
 
 The seed operation is manual — it never runs automatically on startup.
 
+## CSV import & export
+
+### Importing contacts
+
+On the **Contacts** page, click **Import CSV** and choose a `.csv` file
+(UTF-8 encoded). A sample template is available via the **CSV template**
+link next to the page-size selector. The CSV must have a header row with
+these columns:
+
+```csv
+name,phone_number,email,address
+Rahul Sharma,+919876543210,rahul@example.com,Pune
+Amit Patil,+919876543211,amit@example.com,Mumbai
+```
+
+| Column        | Required | Rules (same as the web form)                              |
+| ------------- | -------- | --------------------------------------------------------- |
+| `name`        | Yes      | 1–255 characters                                          |
+| `phone_number`| Yes      | Unique, E.164 format (`+` followed by 1–15 digits)        |
+| `email`       | No       | Valid email, unique when provided; empty cell = no email  |
+| `address`     | No       | Free text; empty cell = no address                        |
+
+Column names are matched case-insensitively and tolerate surrounding
+whitespace; extra columns are ignored, and `email`/`address` columns may
+be omitted entirely.
+
+**How results are reported.** After the import the page shows a summary
+with the total rows processed, contacts imported, duplicates skipped, and
+failed rows — plus a per-row error list with the file row number and the
+validation reason. Invalid rows are never silently skipped.
+
+**Duplicates.** Rows whose phone number or email already exists (or appears
+twice in the same file) are counted as duplicates and skipped — they do
+not abort the import, and existing contacts are never modified.
+
+**Limits.** Uploads are capped at **5 MB** and **5,000 rows** per file
+(larger files are rejected with `413`). All valid, non-duplicate rows are
+inserted in a **single transaction** — a database error rolls back the
+entire import, so the phonebook never ends up partially updated.
+
+### Exporting contacts
+
+Click **Export CSV** on the Contacts page. The backend generates a
+`phonebook-export-<date>.csv` and downloads it. The export contains
+**every contact you are authorized to access** — not just the current
+page — and respects an active search (only matching contacts are
+exported). Empty result sets download a header-only CSV.
+
+**CSV formula-injection protection:** values beginning with `=`, `+`, `-`,
+or `@` (which includes every phone number, since they start with `+`) are
+prefixed with a single quote (`'`) so spreadsheet applications treat them
+as text instead of formulas. The data itself is preserved — Excel, LibreOffice
+and Google Sheets display the value unchanged. Note that re-importing an
+exported file requires removing that leading quote from the phone numbers
+first, because the importer validates the strict E.164 format.
+
+Both endpoints are also available via the API:
+
+```bash
+# Import (multipart form field "file")
+curl -X POST http://localhost:8000/contacts/import \
+  -H "Authorization: Bearer <token>" -F "file=@contacts.csv"
+
+# Export (optionally filtered: ?q=Rahul)
+curl http://localhost:8000/contacts/export \
+  -H "Authorization: Bearer <token>" -o phonebook-export.csv
+```
+
 ## Local development (without Docker)
 
 ### Backend
@@ -247,7 +318,7 @@ The Vite dev server proxies `/api` requests to `http://localhost:8000`.
 
 ```bash
 cd backend
-python -m pytest          # 14 tests, uses an in-memory SQLite DB (test-only)
+python -m pytest          # 50 tests, uses an in-memory SQLite DB (test-only)
 ```
 
 Or inside the running container:

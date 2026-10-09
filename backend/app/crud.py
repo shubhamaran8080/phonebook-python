@@ -19,14 +19,17 @@ def _apply_search(query, search):
     return query
 
 
-def get_contacts(db: Session, *, skip: int = 0, limit: int = 100, search=None):
-    return (
-        _apply_search(db.query(models.Contact), search)
-        .order_by(models.Contact.id)
-        .offset(skip)
-        .limit(limit)
-        .all()
+def search_contacts(db: Session, search=None):
+    """Return an ordered query of contacts, optionally filtered by a
+    search term (name or phone number). Shared by the paginated list
+    endpoint and the CSV export."""
+    return _apply_search(db.query(models.Contact), search).order_by(
+        models.Contact.id
     )
+
+
+def get_contacts(db: Session, *, skip: int = 0, limit: int = 100, search=None):
+    return search_contacts(db, search).offset(skip).limit(limit).all()
 
 
 def count_contacts(db: Session, search=None) -> int:

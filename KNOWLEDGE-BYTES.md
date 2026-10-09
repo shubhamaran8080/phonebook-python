@@ -1428,6 +1428,8 @@ Updated User Interface
 | `GET /stats` | Dashboard statistics + recent contacts | ✓ |
 | `GET /contacts` | List contacts (`page`, `page_size`, `q`; total in `X-Total-Count`) | ✓ |
 | `POST /contacts` | Add a contact | ✓ |
+| `POST /contacts/import` | Import contacts from an uploaded CSV | ✓ |
+| `GET /contacts/export` | Download contacts as CSV (`q` filters) | ✓ |
 | `GET /contacts/{id}` | Get one contact | ✓ |
 | `PUT /contacts/{id}` | Update a contact | ✓ |
 | `DELETE /contacts/{id}` | Delete a contact | ✓ |
@@ -1436,5 +1438,120 @@ Updated User Interface
 
 The separation of responsibilities makes the project easier to understand, test, maintain, and deploy. Docker Compose brings the complete environment together — frontend, backend, and PostgreSQL — so the application can be started consistently with `docker compose up -d --build`.
 
+---
+
+### Byte 42: CSV Import
+
+**Builds on:** Byte 41
+
+**In plain terms:**
+
+Users can bulk-load contacts by uploading a `.csv` file from the Contacts page. The backend parses the file with Python's built-in `csv` module, validates every row with the *existing* `ContactCreate` Pydantic schema (so the rules are identical to the web form), skips duplicates, and commits all valid rows in one transaction. The response is a summary: `total`, `imported`, `failed`, `duplicates`, and an `errors` list with the file row number and reason for every invalid row — nothing is silently skipped.
+
+**The code:**
+
+```python
+# backend/app/main.py — POST /contacts/import (multipart field "file")
+CSV_COLUMNS = ["name", "phone_number", "email", "address"]
+IMPORT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+IMPORT_MAX_ROWS = 5000
+
+filename = (file.filename or "").lower()
+if not filename.endswith(".csv"):
+    raise HTTPException(status_code=400, detail="Only .csv files can be imported.")
+content = file.file.read(IMPORT_MAX_BYTES + 1)   # cap the read, never load more
+if len(content) > IMPORT_MAX_BYTES:
+    raise HTTPException(status_code=413, detail="...")
+text = content.decode("utf-8-sig")               # BOM-tolerant UTF-8
+
+reader = csv.DictReader(io.StringIO(text))
+column_map = {n: n.strip().lower() for n in (reader.fieldnames or [])
+              if n.strip().lower() in CSV_COLUMNS}   # case-insensitive headers
+if "name" not in column_map.values() or "phone_number" not in column_map.values():
+    raise HTTPException(status_code=400, detail="The CSV must include 'name' and 'phone_number' columns.")
+
+valid_rows, errors = [], []
+for raw in reader:
+    row_number = reader.line_num                 # real line number in the file
+    if len(valid_rows) + len(errors) >= IMPORT_MAX_ROWS:
+        raise HTTPException(status_code=413, detail="...")
+    payload = {field: (raw.get(name) or "").strip() for name, field in column_map.items()}
+    for field in ("email", "address"):           # empty optional cell = NULL
+        if payload.get(field) == "": payload[field] = None
+    try:
+        schemas.ContactCreate(**payload)         # existing validation rules
+    except ValidationError as e:
+        errors.append({"row": row_number,
+                       "errors": [f"{'.'.join(map(str, err['loc']))}: {err['msg']}"
+                                  for err in e.errors()]})
+        continue
+    valid_rows.append(payload)
+
+# Pre-check duplicates (same approach as seed.py), then ONE atomic commit.
+used_phones = {row[0] for row in db.query(models.Contact.phone_number)}
+used_emails = {row[0] for row in db.query(models.Contact.email) if row[0]}
+for payload in valid_rows:
+    phone, email = payload["phone_number"], payload.get("email")
+    if phone in used_phones or (email is not None and email in used_emails):
+        duplicates += 1                          # skip, but count it
+        continue
+    db.add(models.Contact(**payload))
+    used_phones.add(phone)
+    if email is not None: used_emails.add(email)
+    imported += 1
+try:
+    db.commit()                                  # all-or-nothing
+except IntegrityError:
+    db.rollback()
+    raise HTTPException(status_code=409, detail="...")
+```
+
+Empty optional columns (`email`, `address`) may be omitted from the file entirely; the payload then simply lacks those keys and they default to `NULL`. Because the check is a pre-query plus a single commit, a crash mid-import can never leave a half-written phonebook. `python-multipart` was added to `backend/requirements.txt` — FastAPI needs it for `UploadFile`/`File()`.
+
+The frontend (`ContactList.vue`) wires a hidden `<input type="file">` to the **Import CSV** button, posts `FormData` via `api.importContacts`, and renders the summary in an `.import-panel`: a green success alert for a clean import, an info alert for partial results ("3 contacts imported, 1 row failed"), and a scrollable per-row error list. On success the list reloads from **page 1** (imported contacts may not match the current search), and the dashboard stats refresh on the next visit because `DashboardView` re-fetches `/stats` on mount.
+
+---
+
+### Byte 43: CSV Export
+
+**Builds on:** Byte 42
+
+**In plain terms:**
+
+The **Export CSV** button downloads every contact the user is authorized to access — not just the current page — as a streamed `text/csv` file. If a search is active, only matching contacts are exported (the export reuses the exact same search filter as the list). Values that a spreadsheet could interpret as formulas are neutralized with a leading single quote.
+
+**The code:**
+
+```python
+# backend/app/main.py — GET /contacts/export?q=...
+@app.get("/contacts/export", dependencies=[Depends(auth_utils.get_current_user)])
+def export_contacts(q: str | None = Query(None), db: Session = Depends(get_db)):
+    def sanitize(value):
+        # CSV formula-injection guard: prefix anything that could
+        # be evaluated as a formula (=, +, -, @) so spreadsheets
+        # treat it as text. The data itself is preserved.
+        if value and value[0] in ("=", "+", "-", "@"):
+            return "'" + value
+        return value or ""
+
+    def generate():
+        buffer, writer = io.StringIO(), csv.writer(io.StringIO(), lineterminator="\n")
+        # ... writer.writerow(CSV_COLUMNS); yield header line ...
+        for contact in crud.search_contacts(db, q):   # same filter as the list
+            # ... writer.writerow([sanitize(contact.name), sanitize(contact.phone_number),
+            #                       sanitize(contact.email), sanitize(contact.address)]) ...
+            yield buffer.getvalue()
+
+    filename = f"phonebook-export-{datetime.now(timezone.utc).date().isoformat()}.csv"
+    return StreamingResponse(generate(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+```
+
+`crud.search_contacts` is the shared helper that both the paginated list endpoint and the export use, so the export honors the current search term for free. The generator streams row by row, so large exports do not have to be buffered in memory. An empty result set simply yields the header row.
+
+On the frontend, `api.exportContacts(search)` calls the endpoint with `responseType: 'blob'`, then triggers a download from a `Blob` URL using the filename from the `Content-Disposition` header (falling back to `phonebook-export-<date>.csv`). A **CSV template** link in the toolbar downloads a sample file generated client-side as a `Blob` (`name,phone_number,email,address` plus two example rows), so users know the required columns before importing.
+
+---
+
 PUTTING IT TOGETHER
-The user signs in through the Vue.js login screen, which stores the JWT returned by FastAPI in localStorage. Vue sends API requests with the token to the FastAPI backend, which verifies the JWT, validates the data using Pydantic schemas, and delegates database operations to the CRUD layer. SQLAlchemy communicates with PostgreSQL, where contacts and user accounts are stored persistently. The dashboard reads live statistics from the backend, the seed script generates thousands of dummy contacts for testing, and Docker Compose runs the frontend, backend, and PostgreSQL services together so the complete application can be started consistently.
+The user signs in through the Vue.js login screen, which stores the JWT returned by FastAPI in localStorage. Vue sends API requests with the token to the FastAPI backend, which verifies the JWT, validates the data using Pydantic schemas, and delegates database operations to the CRUD layer. SQLAlchemy communicates with PostgreSQL, where contacts and user accounts are stored persistently. The dashboard reads live statistics from the backend, contacts can be bulk-imported from a CSV file (validated row by row, duplicates reported, single atomic commit) and exported to CSV (streamed, search-aware, formula-injection protected), the seed script generates thousands of dummy contacts for testing, and Docker Compose runs the frontend, backend, and PostgreSQL services together so the complete application can be started consistently.

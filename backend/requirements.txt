@@ -7,6 +7,7 @@ python-dotenv==1.0.1
 python-jose[cryptography]==3.3.0
 bcrypt>=4.0.1,<5
 Faker>=33.0.0
+python-multipart==0.0.20
 
 # Testing
 pytest==8.3.4
